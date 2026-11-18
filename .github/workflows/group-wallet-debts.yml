@@ -1,0 +1,148 @@
+name: Group wallet debts and publish
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/group-wallet-debts.yml'
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+concurrency:
+  group: wallet-pages
+  cancel-in-progress: false
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Add grouped debt view without migrating stored data
+        shell: python
+        run: |
+          from pathlib import Path
+          p=Path('index.html')
+          s=p.read_text(encoding='utf-8')
+          assert 'walletDB' in s and 'wallet-lock.js' in s, 'Unexpected app version'
+          tag='<script src="./grouped-debts.js"></script>'
+          if tag not in s:
+              s=s.replace('</body>',tag+'</body>')
+          p.write_text(s,encoding='utf-8')
+          Path('grouped-debts.js').write_text(r'''
+          (()=>{
+            'use strict';
+            let selected=null,history=false,query='';
+            const text=(ar,en)=>L==='ar'?ar:en;
+            const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+            const key=n=>String(n||'').trim().replace(/\s+/g,' ');
+            const cents=n=>Math.round(Number(n||0)*100);
+            const remain=d=>Math.max(0,cents(d.amount)-cents(d.paid))/100;
+            const groups=()=>{
+              const m=new Map();
+              DB.debts.forEach((d,index)=>{const k=key(d.name);if(!m.has(k))m.set(k,[]);m.get(k).push({d,index});});
+              return [...m].sort((a,b)=>a[0].localeCompare(b[0],L));
+            };
+            const totals=rows=>rows.reduce((s,{d})=>{s[d.type==='owe'?'owe':'due']+=Math.round(remain(d)*100);return s;},{owe:0,due:0});
+            const summary=rows=>{
+              const s=totals(rows),net=s.due-s.owe;
+              return `<div class="grid"><div><small>${text('عليّ له','I owe')}</small><b class="neg">${esc(money(s.owe/100))}</b></div><div><small>${text('لي عنده','Owed to me')}</small><b class="pos">${esc(money(s.due/100))}</b></div></div><p class="note">${text('الصافي للعرض فقط، دون تسوية تلقائية','Net is informational; no automatic offset')}: ${net===0?esc(money(0)):(net>0?text('لي ','Owed to me '):text('عليّ ','I owe '))+esc(money(Math.abs(net)/100))}</p>`;
+            };
+            const previousRender=render;
+            render=function(){previousRender();draw();};
+            function button(label,fn,cls='ghost'){
+              const b=document.createElement('button');b.className='small '+cls;b.textContent=label;b.onclick=fn;return b;
+            }
+            function newDebt(name){
+              debtModal();if(name&&document.getElementById('dn'))$('dn').value=name;
+            }
+            function draw(){
+              const root=$('view-debts');if(!root)return;
+              root.innerHTML='';
+              const panel=document.createElement('section');panel.className='card';root.append(panel);
+              const top=document.createElement('div');top.className='row';panel.append(top);
+              const heading=document.createElement('h2');heading.textContent=selected===null?text('الديون حسب الأشخاص','Debts by person'):selected;top.append(heading);
+              top.append(button(text('إضافة دين','Add debt'),()=>newDebt(selected),'primary'));
+              const nav=document.createElement('div');nav.className='actions';panel.append(nav);
+              if(selected!==null)nav.append(button(text('كل الأشخاص','All people'),()=>{selected=null;query='';draw();}));
+              nav.append(button(text('الديون النشطة','Active debts'),()=>{history=false;draw();},history?'ghost':'primary'));
+              nav.append(button(text('السجل / المسدّد','History / paid'),()=>{history=true;draw();},history?'primary':'ghost'));
+              if(selected===null){
+                const search=document.createElement('input');search.placeholder=text('ابحث عن شخص','Search people');search.value=query;search.style.margin='12px 0';panel.append(search);
+                const list=document.createElement('div');panel.append(list);
+                const fill=()=>{
+                  list.innerHTML='';let count=0;
+                  groups().filter(([name])=>name.toLocaleLowerCase().includes(query.toLocaleLowerCase())).forEach(([name,all])=>{
+                    const rows=all.filter(({d})=>history?remain(d)===0:remain(d)>0);if(!rows.length)return;count++;
+                    const card=document.createElement('div');card.className='stat';card.style.marginBottom='12px';
+                    const title=document.createElement('div');title.className='row';
+                    const n=document.createElement('b');n.textContent=name||text('بدون اسم','Unnamed');title.append(n);
+                    title.append(button(text('فتح الفواتير','View invoices'),()=>{selected=name;draw();}));card.append(title);
+                    const sums=document.createElement('div');sums.innerHTML=summary(all);card.append(sums);
+                    const countLabel=document.createElement('small');countLabel.textContent=text('عدد الفواتير: ','Invoices: ')+rows.length;card.append(countLabel);list.append(card);
+                  });
+                  if(!count){const e=document.createElement('p');e.className='empty';e.textContent=history?text('لا توجد فواتير مسددة','No paid invoices'):text('لا توجد ديون نشطة مطابقة','No matching active debts');list.append(e);}
+                };
+                search.oninput=()=>{query=search.value;fill();};fill();return;
+              }
+              const all=groups().find(([name])=>name===selected)?.[1]||[];
+              const sums=document.createElement('div');sums.className='stat';sums.style.margin='12px 0';sums.innerHTML=summary(all);panel.append(sums);
+              const rows=all.filter(({d})=>history?remain(d)===0:remain(d)>0);
+              rows.forEach(({d,index})=>{
+                const card=document.createElement('div');card.className='stat';card.style.marginBottom='12px';
+                const late=d.due&&remain(d)>0&&d.due<today();
+                const title=document.createElement('b');title.textContent=text('فاتورة رقم ','Invoice #')+(index+1)+' — '+(d.type==='owe'?text('عليّ','I owe'):text('لي','Owed to me'));card.append(title);
+                const info=document.createElement('p');info.className='note';
+                info.textContent=text('الأصلي: ','Original: ')+money(d.amount)+' | '+text('المسدّد: ','Paid: ')+money(d.paid)+' | '+text('المتبقي: ','Remaining: ')+money(remain(d));card.append(info);
+                const details=document.createElement('p');details.className='note';details.textContent=[d.created,d.due?text('الاستحقاق: ','Due: ')+d.due:'',late?text('متأخر','Overdue'):'',d.category,d.note].filter(Boolean).join(' • ');card.append(details);
+                const actions=document.createElement('div');actions.className='actions';
+                if(remain(d)>0){
+                  actions.append(button(text('دفعة لهذه الفاتورة','Pay this invoice'),()=>payDebt(d.id),'green'));
+                  actions.append(button(text('تسديد كامل','Pay in full'),()=>{if(confirm(text('تأكيد تسديد هذه الفاتورة بالكامل؟','Confirm payment in full for this invoice?')))fullPay(d.id);},'primary'));
+                }
+                actions.append(button(text('تعديل','Edit'),()=>debtModal(d.id)));card.append(actions);
+                const payments=document.createElement('details');const label=document.createElement('summary');label.textContent=text('سجل الدفعات','Payment history')+' ('+(d.payments||[]).length+')';payments.append(label);
+                (d.payments||[]).forEach(p=>{const line=document.createElement('p');line.className='note';line.textContent=[p.date,money(p.amount),p.note].filter(Boolean).join(' • ');payments.append(line);});card.append(payments);panel.append(card);
+              });
+              if(!rows.length){const e=document.createElement('p');e.className='empty';e.textContent=history?text('لا توجد فواتير مسددة لهذا الشخص','No paid invoices for this person'):text('لا توجد ديون نشطة لهذا الشخص','No active debts for this person');panel.append(e);}
+            }
+            const previousDebtModal=debtModal;
+            debtModal=function(id){
+              previousDebtModal(id);const input=$('dn');if(!input)return;
+              const list=document.createElement('datalist');list.id='wallet-known-names';
+              groups().forEach(([name])=>{const option=document.createElement('option');option.value=name;list.append(option);});
+              input.setAttribute('list',list.id);input.autocomplete='off';input.after(list);
+              const select=document.createElement('select');const empty=document.createElement('option');empty.value='';empty.textContent=text('اختر اسمًا سابقًا أو اكتب اسمًا جديدًا','Choose an existing name or type a new one');select.append(empty);
+              groups().forEach(([name])=>{const o=document.createElement('option');o.value=name;o.textContent=name;select.append(o);});
+              select.onchange=()=>{if(select.value)input.value=select.value;};input.before(select);
+            };
+            render();
+          })();
+          ''',encoding='utf-8')
+          sw=Path('sw.js')
+          worker=sw.read_text(encoding='utf-8').replace('mobile-wallet-shell-v1','mobile-wallet-shell-v2')
+          if "'./grouped-debts.js'" not in worker:
+              worker=worker.replace("'./wallet-lock.js',","'./wallet-lock.js','./grouped-debts.js',")
+          sw.write_text(worker,encoding='utf-8')
+      - name: Check added JavaScript
+        run: node --check grouped-debts.js
+      - name: Commit updated files
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add index.html grouped-debts.js sw.js
+          git diff --cached --quiet || (git commit -m "Group existing debts by person without changing stored records" && git push origin HEAD:main)
+      - name: Prepare site
+        run: |
+          mkdir -p /tmp/wallet-site/icons
+          cp index.html manifest.webmanifest wallet-lock.js grouped-debts.js sw.js /tmp/wallet-site/
+          cp icons/*.png /tmp/wallet-site/icons/
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: /tmp/wallet-site
+      - uses: actions/deploy-pages@v4
+        id: deployment
