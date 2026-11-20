@@ -1,7 +1,9 @@
 
 (()=>{
   'use strict';
-  let selected=null,history=false,query='';
+  let selected=null,history=false,query='',priorityFilter='';
+const priorityOptions=()=>[['urgent',text('عاجل','Urgent'),'#ef4444'],['soon',text('قريب','Soon'),'#f59e0b'],['normal',text('غير عاجل','Normal'),'#22c55e']];
+
   const text=(ar,en)=>L==='ar'?ar:en;
   const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const key=n=>String(n||'').trim().replace(/\s+/g,' ');
@@ -36,13 +38,22 @@
     if(selected!==null)nav.append(button(text('كل الأشخاص','All people'),()=>{selected=null;query='';draw();}));
     nav.append(button(text('الديون النشطة','Active debts'),()=>{history=false;draw();},history?'ghost':'primary'));
     nav.append(button(text('السجل / المسدّد','History / paid'),()=>{history=true;draw();},history?'primary':'ghost'));
+    const urgencies=makePriorities();panel.append(urgencies);
+    function makePriorities(){
+      const wrap=document.createElement('div');wrap.className='actions';
+      wrap.append(button(text('كل الدرجات','All priorities'),()=>{priorityFilter='';draw();}));
+      for(const [value,name,color] of priorityOptions()){
+        const n=DB.debts.filter(d=>remain(d)>0&&(d.priority||'normal')===value).length;
+        const b=button(name+' ('+n+')',()=>{priorityFilter=value;draw();});b.style.border='2px solid '+color;b.style.color=color;if(priorityFilter===value)b.style.background='#1e293b';wrap.append(b);
+      }return wrap;
+    }
     if(selected===null){
       const search=document.createElement('input');search.placeholder=text('ابحث عن شخص','Search people');search.value=query;search.style.margin='12px 0';panel.append(search);
       const list=document.createElement('div');panel.append(list);
       const fill=()=>{
         list.innerHTML='';let count=0;
         groups().filter(([name])=>name.toLocaleLowerCase().includes(query.toLocaleLowerCase())).forEach(([name,all])=>{
-          const rows=all.filter(({d})=>history?remain(d)===0:remain(d)>0);if(!rows.length)return;count++;
+          const rows=all.filter(({d})=>(history?remain(d)===0:remain(d)>0)&&(!priorityFilter||(d.priority||'normal')===priorityFilter));if(!rows.length)return;count++;
           const card=document.createElement('div');card.className='stat';card.style.marginBottom='12px';
           const title=document.createElement('div');title.className='row';
           const n=document.createElement('b');n.textContent=name||text('بدون اسم','Unnamed');title.append(n);
@@ -56,11 +67,14 @@
     }
     const all=groups().find(([name])=>name===selected)?.[1]||[];
     const sums=document.createElement('div');sums.className='stat';sums.style.margin='12px 0';sums.innerHTML=summary(all);panel.append(sums);
-    const rows=all.filter(({d})=>history?remain(d)===0:remain(d)>0);
+    const rows=all.filter(({d})=>(history?remain(d)===0:remain(d)>0)&&(!priorityFilter||(d.priority||'normal')===priorityFilter));
     rows.forEach(({d,index})=>{
       const card=document.createElement('div');card.className='stat';card.style.marginBottom='12px';
       const late=d.due&&remain(d)>0&&d.due<today();
       const title=document.createElement('b');title.textContent=text('فاتورة رقم ','Invoice #')+(index+1)+' — '+(d.type==='owe'?text('عليّ','I owe'):text('لي','Owed to me'));card.append(title);
+      const priority=document.createElement('select');priority.setAttribute('aria-label',text('درجة الاستعجال','Urgency'));
+      for(const [value,name,color] of priorityOptions()){const option=document.createElement('option');option.value=value;option.textContent=name;priority.append(option);}
+      priority.value=d.priority||'normal';priority.style.borderColor=priorityOptions().find(x=>x[0]===priority.value)?.[2]||'#22c55e';priority.onchange=()=>{d.priority=priority.value;save();render();};card.append(priority);
       const info=document.createElement('p');info.className='note';
       info.textContent=text('الأصلي: ','Original: ')+money(d.amount)+' | '+text('المسدّد: ','Paid: ')+money(d.paid)+' | '+text('المتبقي: ','Remaining: ')+money(remain(d));card.append(info);
       const details=document.createElement('p');details.className='note';details.textContent=[d.created,d.due?text('الاستحقاق: ','Due: ')+d.due:'',late?text('متأخر','Overdue'):'',d.category,d.note].filter(Boolean).join(' • ');card.append(details);
